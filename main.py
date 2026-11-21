@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Deliver the 21 November 2026 front page.
+"""Ship the finished 21 November 2026 front page.
 
-The repository holds the finished page as entry.png. This program places a
-byte-identical copy at $MAKEFUN_OUTPUT_DIR/entry.png (or /output/entry.png
-when the variable is unset) and proves the copy before it exits: same SHA-256
-as the source, at most 1 MiB, and a PNG header that says 1024 by 1024.
-Standard library only; nothing is drawn or downloaded here.
+The newspaper image lives in this repository as entry.png. Running this
+program drops an exact copy at $MAKEFUN_OUTPUT_DIR/entry.png (falling back
+to /output/entry.png) and checks the copy before it exits: the bytes match
+the source, the file is at most 1 MiB, and the PNG header declares 1024 by
+1024. Pure standard library; the program draws nothing and fetches nothing.
 """
 
 import hashlib
@@ -14,71 +14,79 @@ import shutil
 import struct
 import sys
 
-MAX_BYTES = 1_048_576
-SIDE = 1024
+LIMIT = 1_048_576
+EDGE = 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def fail(message):
-    print(f"error: {message}", file=sys.stderr)
+def abort(reason):
+    print(f"error: {reason}", file=sys.stderr)
     return 1
 
 
-def png_dimensions(blob):
-    """Return (width, height) from a PNG byte string, or None if malformed."""
-    if len(blob) < 33 or blob[:8] != b"\x89PNG\r\n\x1a\n":
+def png_size(data):
+    """Pull (width, height) out of a PNG's IHDR chunk; None when broken."""
+    if len(data) < 33:
         return None
-    if blob[12:16] != b"IHDR":
+    if data[:8] != PNG_MAGIC:
         return None
-    width, height = struct.unpack(">II", blob[16:24])
-    return width, height
+    if data[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", data[16:24])
 
 
-def digest_of(path):
-    hasher = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while True:
+            block = stream.read(1 << 20)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def inspect(path, label):
+    """Read a PNG and confirm it is a 1024x1024 image within the size cap."""
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read()
+    except OSError as exc:
+        return None, f"cannot read {label} image: {exc}"
+    size = len(data)
+    if size > LIMIT:
+        return None, f"{label} image is {size} bytes, over the 1 MiB limit"
+    dims = png_size(data)
+    if dims is None:
+        return None, f"{label} image is not a well-formed PNG with an IHDR chunk"
+    if dims != (EDGE, EDGE):
+        return None, f"{label} image is {dims[0]}x{dims[1]}, expected 1024x1024"
+    return data, None
 
 
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(here, "entry.png")
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    target = os.path.join(out_dir, "entry.png")
+    base = os.path.dirname(os.path.abspath(__file__))
+    origin = os.path.join(base, "entry.png")
+    dest_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    dest = os.path.join(dest_dir, "entry.png")
 
-    if not os.path.isfile(source):
-        return fail(f"missing source image: {source}")
-    with open(source, "rb") as handle:
-        source_blob = handle.read()
-    source_dims = png_dimensions(source_blob)
-    if source_dims is None:
-        return fail("source image is not a well-formed PNG with an IHDR chunk")
-    if source_dims != (SIDE, SIDE):
-        return fail(f"source image is {source_dims[0]}x{source_dims[1]}, "
-                     "expected 1024x1024")
-    os.makedirs(out_dir, exist_ok=True)
+    if not os.path.isfile(origin):
+        return abort(f"missing source image: {origin}")
+    source_data, problem = inspect(origin, "source")
+    if problem:
+        return abort(problem)
 
-    shutil.copyfile(source, target)
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copyfile(origin, dest)
 
-    want = digest_of(source)
-    got = digest_of(target)
-    if want != got:
-        return fail("copy digest mismatch after writing the image")
+    if hashlib.sha256(source_data).hexdigest() != sha256_of(dest):
+        return abort("copy digest mismatch after writing the image")
+    target_data, problem = inspect(dest, "output")
+    if problem:
+        return abort(problem)
 
-    size = os.path.getsize(target)
-    if size > MAX_BYTES:
-        return fail(f"image is {size} bytes, over the 1 MiB limit")
-
-    with open(target, "rb") as handle:
-        blob = handle.read()
-    dims = png_dimensions(blob)
-    if dims is None:
-        return fail("output is not a well-formed PNG with an IHDR chunk")
-    if dims != (SIDE, SIDE):
-        return fail(f"image is {dims[0]}x{dims[1]}, expected 1024x1024")
-
-    print(f"entry.png written: 1024x1024 {size} bytes sha256 {got}")
+    print(f"entry.png written: 1024x1024 {len(target_data)} bytes "
+          f"sha256 {sha256_of(dest)}")
     return 0
 
 
